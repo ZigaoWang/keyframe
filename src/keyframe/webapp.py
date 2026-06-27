@@ -175,7 +175,8 @@ def _run_comparison(
     for emb in embedders:
         cfg = _build_config(
             emb, sample_interval, sim_threshold, 2.0, 0.92, 3,
-            enable_caption=False, caption_model="gpt-5.4", output_root=output_root,
+            enable_caption=False, caption_model="gpt-5.4",
+            output_root=output_root,
         )
         t0 = time.perf_counter()
         last: ProgressEvent | None = None
