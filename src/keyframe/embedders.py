@@ -4,9 +4,16 @@ Each embedder turns a BGR frame into a 1-D float32 numpy vector. Vectors live
 in cosine-similarity space, which is all downstream stages care about.
 
 Registered embedders:
-  yolov8n / yolov8s / yolov8m   YOLOv8 detector backbone features (256-d)
-  phash                          64-bit perceptual hash unpacked to 64-d (cheap baseline)
-  hsv                            HSV histogram, 96-d (color-only signature)
+  yolov8n / yolov8s / yolov8m      YOLOv8 detector backbone features
+  yolov8n-seg                       YOLOv8 segmentation backbone
+  yolo11n / yolo11s                 YOLO11 detector backbone
+  yolo26n                           YOLO26 NMS-free detector backbone
+  mobile_sam                        MobileSAM TinyViT image encoder (global-pooled)
+  clip-vit-b32 / b16 / l14          OpenAI CLIP image tower (semantic)
+  siglip-b16                        SigLIP base/16-256 (beats CLIP on retrieval)
+  mobileclip-s0                     MobileCLIP-S0 (Apple) - fastest semantic encoder
+  phash                             8x8 DCT perceptual hash (cheap baseline)
+  hsv                               HSV histogram (color-only signature)
 
 Adding a new model = subclass Embedder, decorate with @register("name").
 """
@@ -299,6 +306,124 @@ class HsvHistogramEmbedder(Embedder):
                 hist = hist / total
             parts.append(hist.astype(np.float32))
         return np.concatenate(parts)
+
+
+# --------------------------------------------------------------------------- #
+# Semantic encoders (CLIP family via open_clip)                               #
+# --------------------------------------------------------------------------- #
+
+class _OpenClipEmbedder(Embedder):
+    """Base class for open_clip image-tower embedders.
+
+    Subclasses set ``model_name`` and ``pretrained`` (open_clip ids); we
+    construct the tower once, then push BGR frames through the standard
+    open_clip transforms in batches. Output is the projected image
+    embedding (i.e. the same vector the text tower compares against).
+
+    Why open_clip and not transformers? open_clip ships the original CLIP
+    weights, the LAION re-trains, SigLIP, EVA-CLIP, and MobileCLIP behind
+    one interface, and the install is tiny vs. transformers.
+    """
+    model_name: str = "ViT-B-32"
+    pretrained: str = "openai"
+    dim = 512
+
+    def __init__(self, device: str = "auto") -> None:
+        try:
+            import open_clip
+            import torch
+        except ImportError as exc:
+            raise RuntimeError(
+                f"'{self.name}' requires open_clip_torch.\n"
+                "install it with: pip install 'keyframe[clip]'  (or)  "
+                "pip install open_clip_torch"
+            ) from exc
+
+        self.device = resolve_device(device)
+        self._torch = torch
+        model, _, preprocess = open_clip.create_model_and_transforms(
+            self.model_name, pretrained=self.pretrained,
+        )
+        model.eval()
+        try:
+            model = model.to(self.device)
+            self._torch_device = self.device
+        except Exception:
+            self._torch_device = "cpu"
+            log.warning("%s tower fell back to CPU", self.name)
+        self._model = model
+        self._preprocess = preprocess
+        try:
+            self.dim = int(model.visual.output_dim)
+        except Exception:
+            pass
+        log.info("loaded %s/%s on %s, dim=%d",
+                 self.model_name, self.pretrained, self._torch_device, self.dim)
+
+    def _to_tensor(self, bgr: np.ndarray):
+        from PIL import Image
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        return self._preprocess(Image.fromarray(rgb))
+
+    def embed(self, bgr: np.ndarray) -> np.ndarray:
+        return self.embed_batch([bgr])[0]
+
+    def embed_batch(self, bgrs: list[np.ndarray]) -> np.ndarray:
+        if not bgrs:
+            return np.zeros((0, self.dim), dtype=np.float32)
+        torch = self._torch
+        batch = torch.stack([self._to_tensor(b) for b in bgrs], dim=0)
+        batch = batch.to(self._torch_device)
+        with torch.no_grad():
+            feats = self._model.encode_image(batch)
+        return feats.detach().cpu().numpy().astype(np.float32)
+
+    def info(self) -> EmbedderInfo:
+        return EmbedderInfo(
+            name=self.name, dim=self.dim,
+            device=getattr(self, "_torch_device", "cpu"),
+            backend=f"open_clip {self.model_name}/{self.pretrained}",
+        )
+
+
+@register("clip-vit-b32")
+class ClipViTB32(_OpenClipEmbedder):
+    """OpenAI CLIP ViT-B/32. 512-d. Strong semantic features, ~10 ms / frame on MPS."""
+    model_name = "ViT-B-32"
+    pretrained = "openai"
+    dim = 512
+
+
+@register("clip-vit-b16")
+class ClipViTB16(_OpenClipEmbedder):
+    """OpenAI CLIP ViT-B/16. 512-d. Sharper than B/32, ~2x the cost."""
+    model_name = "ViT-B-16"
+    pretrained = "openai"
+    dim = 512
+
+
+@register("clip-vit-l14")
+class ClipViTL14(_OpenClipEmbedder):
+    """OpenAI CLIP ViT-L/14. 768-d. Best semantic separation we ship; heavy."""
+    model_name = "ViT-L-14"
+    pretrained = "openai"
+    dim = 768
+
+
+@register("siglip-b16")
+class SigLipB16(_OpenClipEmbedder):
+    """SigLIP base/16-256. 768-d. Generally beats CLIP on retrieval benchmarks."""
+    model_name = "ViT-B-16-SigLIP"
+    pretrained = "webli"
+    dim = 768
+
+
+@register("mobileclip-s0")
+class MobileClipS0(_OpenClipEmbedder):
+    """MobileCLIP-S0 (Apple). 512-d, ~3 ms / frame on M-series MPS. Fastest semantic encoder we ship."""
+    model_name = "MobileCLIP-S0"
+    pretrained = "datacompdr"
+    dim = 512
 
 
 def time_embedder_throughput(embedder: Embedder, sample_bgr: np.ndarray, n_runs: int = 20) -> dict:
