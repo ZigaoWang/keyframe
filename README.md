@@ -67,8 +67,11 @@ decode path).
 # core install
 python3 -m pip install -e .
 
-# add the optional Gradio web UI
+# add the Gradio web UI
 python3 -m pip install -e '.[web]'
+
+# add CLIP / SigLIP / MobileCLIP embedders (open_clip + Pillow)
+python3 -m pip install -e '.[clip]'
 
 # add the dev tooling (pytest, ruff)
 python3 -m pip install -e '.[dev]'
@@ -194,12 +197,23 @@ and the Gradio app consume internally.
 | `yolo11n` / `yolo11s` | YOLO11 detector | 256 / 512 | C3K2 + C2PSA blocks; same calling convention. |
 | `yolo26n` | YOLO26 NMS-free detector | 256 | DFL-free regression, MuSGD optimiser. |
 | `mobile_sam` | MobileSAM TinyViT image encoder | 256 | Dense feature map, global-pooled to 256-d. |
+| `clip-vit-b32` | OpenAI CLIP ViT-B/32 (semantic) | 512 | Requires `[clip]` extra. Strong semantic clustering. |
+| `clip-vit-b16` | OpenAI CLIP ViT-B/16 (semantic) | 512 | Sharper than B/32, ~2× cost. |
+| `clip-vit-l14` | OpenAI CLIP ViT-L/14 (semantic) | 768 | Best semantic separation we ship; heavy. |
+| `siglip-b16` | SigLIP base/16-256 | 768 | Generally beats CLIP on retrieval benchmarks. |
+| `mobileclip-s0` | Apple MobileCLIP-S0 | 512 | Fastest semantic encoder, ~3 ms / frame on MPS. |
 | `phash` | 8x8 DCT perceptual hash | 64 | <1 ms on CPU. Zero-dependency baseline. |
 | `hsv` | 3-channel HSV histogram | 96 | <1 ms on CPU. Colour-only signature. |
 
-Neural weights are downloaded on first use by `ultralytics` and cached in the
-project root. The two CPU baselines (`phash`, `hsv`) exist so the benchmark
-mode can answer "is the heavy model worth it?".
+YOLO weights are downloaded on first use by `ultralytics` and cached in the
+project root. CLIP family weights live in `~/.cache/clip` and are pulled by
+`open_clip` on first call. The two CPU baselines (`phash`, `hsv`) exist so
+the benchmark mode can answer "is the heavy model worth it?".
+
+Cluster scenes by **layout** with the YOLO family; cluster by **semantic
+content** (people doing things, objects, settings) with the CLIP family.
+On most real footage, `mobileclip-s0` is the sweet spot for live use and
+`siglip-b16` is the sweet spot for offline quality.
 
 ```bash
 python3 -m keyframe list-embedders
@@ -207,17 +221,64 @@ python3 -m keyframe list-embedders
 
 ## Benchmark mode
 
+Two benchmark modes ship out of the box.
+
+**Embedder benchmark** — runs the full pipeline once per embedder and
+compares latency, segment count, keyframe count, and Jaccard agreement of
+keyframe times against the first (reference) embedder.
+
 ```bash
 python3 -m keyframe benchmark video/video.MOV \
-    --embedders yolov8n yolov8s phash hsv \
+    --embedders yolov8n mobileclip-s0 siglip-b16 phash hsv \
     --sample-interval 1.0 --sim-threshold 0.94
 ```
 
-Writes `outputs/benchmarks/benchmark.md` plus per-embedder run folders. The
-report reports embed latency, segment count, keyframe count, and the Jaccard
-agreement (with ±1.5 s tolerance) between each embedder's keyframe times and
-the reference embedder's. The first embedder in the list is the reference, so
-it always reports 1.0.
+Output: `outputs/benchmarks/benchmark.md` plus per-embedder run folders.
+
+**Captioner benchmark** — runs the keyframe pass once, then sends the same
+keyframe set to every requested LLM. Useful for picking which model to
+default to.
+
+```bash
+python3 -m keyframe caption-bench video/video.MOV \
+    --models gpt-5.4 google/gemini-2.5-flash anthropic/claude-3.5-haiku \
+            qwen/qwen2.5-vl-72b-instruct
+```
+
+Output: `outputs/caption-bench/caption_benchmark.md` (and `.json`) with
+latency, character / word counts, and the full caption text per model.
+
+## Streaming captions
+
+When `OPENAI_API_KEY` is set, the pipeline now captions every shot **as it
+closes** in a background worker, instead of waiting until the whole video
+has been processed. The Gradio UI's *Live narration* card fills in line
+by line as the LLM responses come back; a stronger model then writes the
+final synthesis paragraph at the end.
+
+Toggle and tune via `CaptionerConfig`:
+
+```python
+PipelineConfig(
+    captioner=CaptionerConfig(
+        model="gpt-5.4",                 # final synthesis model
+        segment_model="google/gemini-2.5-flash",  # fast per-shot model
+        segment_max_frames=2,            # frames per shot caption
+        stream_per_segment=True,         # default; set False to disable
+    ),
+)
+```
+
+Per-run artefacts:
+
+| File | Contents |
+| --- | --- |
+| `caption/segments.md` | one bullet per shot |
+| `caption/segments.jsonl` | live event log, written as captions arrive |
+| `caption/caption.md` | final synthesis paragraph |
+
+If `OPENAI_API_KEY` is missing or `--no-caption` is passed, streaming
+captions are silently disabled and the keyframe pipeline runs as before.
 
 ## Tuning cheat sheet
 
