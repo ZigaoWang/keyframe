@@ -22,8 +22,14 @@ def imwrite_unicode(path: Path | str, image: np.ndarray) -> bool:
 
 
 def imread_unicode(path: Path | str) -> np.ndarray | None:
-    """cv2.imread that handles non-ASCII paths."""
-    data = np.fromfile(str(path), dtype=np.uint8)
+    """cv2.imread that handles non-ASCII paths.
+
+    Returns ``None`` when the file does not exist or could not be decoded.
+    """
+    p = Path(path)
+    if not p.exists():
+        return None
+    data = np.fromfile(str(p), dtype=np.uint8)
     if data.size == 0:
         return None
     return cv2.imdecode(data, cv2.IMREAD_COLOR)
