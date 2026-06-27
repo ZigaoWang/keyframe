@@ -94,6 +94,23 @@ class CaptionerConfig:
     error. OpenRouter rejects some ``openai/*`` ids in certain regions; the
     fallbacks here are regularly available worldwide."""
 
+    # ---- streaming caption ---------------------------------------------- #
+    stream_per_segment: bool = True
+    """Caption each segment in a background worker as soon as it closes,
+    instead of waiting until the whole pipeline finishes. Lets the UI display
+    a running narration in real time. The final per-video caption still runs
+    at the end (with the full keyframe set) for coherent prose."""
+
+    segment_max_frames: int = 3
+    """Frames per segment-caption call. The selector's top scorers within
+    that segment are sent. Smaller = faster + cheaper; 1 is allowed."""
+
+    segment_model: str = ""
+    """Optional override for the per-segment caption model. Empty string
+    means reuse :attr:`model`. Recommended: pick something fast and cheap
+    (gpt-4o-mini, gemini-2.5-flash, claude-3.5-haiku) here, and a stronger
+    model for the final synthesis."""
+
 
 @dataclass
 class EmbedderConfig:

@@ -50,6 +50,14 @@ SYSTEM_PROMPT = (
 )
 
 
+SEGMENT_SYSTEM_PROMPT = (
+    "You describe one shot from a longer video. Given 1-3 frames sampled from "
+    "the same shot, write ONE short sentence (max 25 words) stating what is "
+    "visible: subject, action, setting. No speculation about location, names, "
+    "brands or motives. No preamble, no markdown, just the sentence."
+)
+
+
 USER_HEADER_TEMPLATE = (
     "Below are {n} keyframes selected from a single video of duration ~{dur:.1f}s, "
     "presented in temporal order. Synthesize what happens across the whole video.\n"
@@ -66,6 +74,18 @@ class CaptionResult:
     raw: dict | None
 
 
+@dataclass
+class SegmentCaption:
+    """One shot's worth of caption. Streamed back as soon as the LLM returns."""
+    segment_id: int
+    start_sec: float
+    end_sec: float
+    text: str
+    model: str
+    latency_sec: float
+    frames_sent: int
+
+
 def _frame_to_data_url(bgr: np.ndarray, max_width: int, quality: int) -> str:
     img = resize_max_width(bgr, max_width)
     ok, enc = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, int(quality)])
@@ -73,6 +93,57 @@ def _frame_to_data_url(bgr: np.ndarray, max_width: int, quality: int) -> str:
         raise RuntimeError("cv2.imencode failed")
     b64 = base64.b64encode(enc.tobytes()).decode("ascii")
     return f"data:image/jpeg;base64,{b64}"
+
+
+def _looks_regional(exc: Exception) -> bool:
+    """Heuristic: did this OpenAI-compatible call fail for region / auth reasons?"""
+    msg = str(exc)
+    return any(token in msg for token in (
+        "403", "not available in your region", "country",
+        "invalid_api_key", "Unauthorized", "401",
+    ))
+
+
+def _build_client(cfg: CaptionerConfig):
+    """Construct an OpenAI client honouring OPENAI_BASE_URL. Raises if no key set."""
+    api_key = os.environ.get(cfg.api_key_env)
+    if not api_key:
+        raise RuntimeError(
+            f"missing {cfg.api_key_env}. set it in .env or environment to enable captioning."
+        )
+    from openai import OpenAI
+    base_url = os.environ.get(cfg.base_url_env, "") or None
+    return OpenAI(base_url=base_url) if base_url else OpenAI()
+
+
+def _chat_with_fallback(
+    client,
+    primary: str,
+    fallbacks: tuple[str, ...],
+    messages: list[dict],
+) -> tuple[object, str]:
+    """Try primary, then each fallback, on regional / auth-flavoured errors.
+
+    Returns ``(response, used_model)``. Raises the last error if every model fails.
+    Any non-regional error is re-raised immediately (no retries on bad input).
+    """
+    last_error: Exception | None = None
+    for attempt, model_name in enumerate((primary, *fallbacks)):
+        try:
+            log.info("captioner: trying %s ...", model_name)
+            response = client.chat.completions.create(
+                model=model_name, messages=messages,
+            )
+            return response, model_name
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            if not _looks_regional(exc):
+                raise
+            log.warning("captioner: %s failed (%s) -- trying fallback",
+                        model_name, type(exc).__name__)
+            if attempt == len(fallbacks):
+                break
+    raise RuntimeError(f"all captioner models failed. last error: {last_error}")
 
 
 def _build_content(keyframes: list[Keyframe], duration_sec: float, cfg: CaptionerConfig) -> list[dict]:
@@ -108,14 +179,7 @@ def caption_keyframes(
                              model=cfg.model, frames_sent=0, latency_sec=0.0,
                              usage=None, raw=None)
 
-    api_key = os.environ.get(cfg.api_key_env)
-    if not api_key:
-        raise RuntimeError(
-            f"missing {cfg.api_key_env}. set it in .env or environment to enable captioning."
-        )
-
     if len(keyframes) > cfg.max_keyframes:
-        # uniformly subsample to the cap
         idx = np.linspace(0, len(keyframes) - 1, cfg.max_keyframes).round().astype(int).tolist()
         seen: list[int] = []
         for i in idx:
@@ -124,53 +188,21 @@ def caption_keyframes(
         keyframes = [keyframes[i] for i in seen]
         log.info("capped keyframes to %d for captioning", len(keyframes))
 
-    from openai import OpenAI
-    base_url = os.environ.get(cfg.base_url_env, "") or None
-    client = OpenAI(base_url=base_url) if base_url else OpenAI()
-
+    client = _build_client(cfg)
     content = _build_content(keyframes, duration_sec, cfg)
 
-    models_to_try = [cfg.model, *cfg.fallback_models]
-    last_error: Exception | None = None
-    response = None
-    used_model = cfg.model
     t0 = time.perf_counter()
-
-    for attempt, model_name in enumerate(models_to_try):
-        try:
-            log.info("captioner: trying %s (%d frame%s) ...",
-                     model_name, len(keyframes), "" if len(keyframes) == 1 else "s")
-            response = client.chat.completions.create(
-                model=model_name,
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": content},
-                ],
-            )
-            used_model = model_name
-            break
-        except Exception as exc:  # noqa: BLE001 - intentionally broad
-            last_error = exc
-            msg = str(exc)
-            looks_regional = any(token in msg for token in (
-                "403", "not available in your region", "country",
-                "invalid_api_key", "Unauthorized", "401",
-            ))
-            log.warning("captioner: %s failed (%s)%s",
-                        model_name, type(exc).__name__,
-                        " -- trying fallback" if looks_regional and attempt < len(models_to_try) - 1 else "")
-            if not looks_regional:
-                raise
-            continue
-
-    if response is None:
-        raise RuntimeError(
-            f"all captioner models failed. last error: {last_error}"
-        )
-
+    response, used_model = _chat_with_fallback(
+        client, cfg.model, cfg.fallback_models,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": content},
+        ],
+    )
     latency = time.perf_counter() - t0
     raw_text = response.choices[0].message.content
     text = (raw_text or "").strip()
+
     usage = None
     if getattr(response, "usage", None) is not None:
         try:
@@ -190,3 +222,61 @@ def caption_keyframes(
     log.info("captioner: %d chars in %.2fs (model=%s)", len(text), latency, used_model)
     return CaptionResult(text=text, model=used_model, frames_sent=len(keyframes),
                          latency_sec=latency, usage=usage, raw=raw)
+
+
+def caption_segment(
+    segment_id: int,
+    start_sec: float,
+    end_sec: float,
+    keyframes: list[Keyframe],
+    cfg: CaptionerConfig,
+) -> SegmentCaption:
+    """One-sentence caption for a single shot.
+
+    Picks up to ``cfg.segment_max_frames`` keyframes (the top-scoring ones,
+    as ranked by the selector) and asks the LLM to describe just that shot.
+    Uses ``cfg.segment_model`` when set, otherwise ``cfg.model``. Falls back
+    through ``cfg.fallback_models`` on regional / auth errors.
+    """
+    if not keyframes:
+        return SegmentCaption(
+            segment_id=segment_id, start_sec=start_sec, end_sec=end_sec,
+            text="(no keyframes)", model="", latency_sec=0.0, frames_sent=0,
+        )
+
+    picked = sorted(keyframes, key=lambda k: -k.composite_score)[:max(1, cfg.segment_max_frames)]
+    picked.sort(key=lambda k: k.timestamp_sec)
+
+    content: list[dict] = [{
+        "type": "text",
+        "text": (f"Shot starting at t={start_sec:.1f}s, ending at t={end_sec:.1f}s "
+                 f"({end_sec - start_sec:.1f}s long). {len(picked)} frame(s) follow."),
+    }]
+    for k in picked:
+        bgr = imread_unicode(k.bgr_path)
+        if bgr is None:
+            log.warning("segment caption: missing keyframe image %s", k.bgr_path)
+            continue
+        url = _frame_to_data_url(bgr, cfg.thumb_max_width, cfg.jpeg_quality)
+        content.append({"type": "image_url",
+                        "image_url": {"url": url, "detail": cfg.detail}})
+
+    primary = cfg.segment_model or cfg.model
+    client = _build_client(cfg)
+    t0 = time.perf_counter()
+    response, used_model = _chat_with_fallback(
+        client, primary, cfg.fallback_models,
+        messages=[
+            {"role": "system", "content": SEGMENT_SYSTEM_PROMPT},
+            {"role": "user", "content": content},
+        ],
+    )
+    latency = time.perf_counter() - t0
+    raw_text = response.choices[0].message.content
+    text = (raw_text or "").strip()
+    log.info("segment %d caption: %d chars in %.2fs (model=%s)",
+             segment_id, len(text), latency, used_model)
+    return SegmentCaption(
+        segment_id=segment_id, start_sec=start_sec, end_sec=end_sec,
+        text=text, model=used_model, latency_sec=latency, frames_sent=len(picked),
+    )
