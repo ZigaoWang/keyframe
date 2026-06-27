@@ -75,11 +75,26 @@ def _stage_icon(stage: str) -> str:
         "init": "[init]",
         "frame": "[frame]",
         "segment_closed": "[shot]",
+        "segment_caption": "[say]",
         "select": "[pick]",
         "visualize": "[viz]",
         "caption": "[llm]",
         "done": "[done]",
     }.get(stage, "[?]")
+
+
+def _live_narration_md(captions: list) -> str:
+    """Render segment captions as a live narration markdown block."""
+    if not captions:
+        return "_(narration will stream here as each shot is captioned.)_"
+    lines = ["### Live narration", ""]
+    for cap in captions:
+        lines.append(
+            f"**Shot {cap.segment_id} · {cap.start_sec:.1f}–{cap.end_sec:.1f}s** — "
+            f"{cap.text}"
+        )
+        lines.append("")
+    return "\n".join(lines)
 
 
 def _stats_md(ev: ProgressEvent) -> str:
@@ -123,7 +138,8 @@ def _run_single(
 ) -> Iterator[tuple]:
     if not video_path:
         yield (None, "_(idle: drop a video first.)_", "_(no stats yet.)_",
-               [], "_(no caption yet.)_")
+               [], "_(narration will stream here as each shot is captioned.)_",
+               "_(no caption yet.)_")
         return
 
     cfg = _build_config(
@@ -136,6 +152,7 @@ def _run_single(
     last_gallery: list[tuple[str, str]] = []
     last_stats = "_(starting...)_"
     caption = "_(captioning runs after pipeline finishes.)_"
+    narration = "_(narration will stream here as each shot is captioned.)_"
 
     for ev in iter_pipeline(video_path, cfg, refresh_viz_every=4):
         status_log.append(f"{_stage_icon(ev.stage)} {ev.message}")
@@ -146,12 +163,15 @@ def _run_single(
         if ev.keyframes:
             last_gallery = _gallery_items(ev)
         last_stats = _stats_md(ev)
+        if ev.segment_captions:
+            narration = _live_narration_md(ev.segment_captions)
         if ev.caption_text:
             caption = ev.caption_text
         yield (last_film,
                "\n".join(status_log[-12:]),
                last_stats,
                last_gallery,
+               narration,
                caption)
 
 
@@ -217,6 +237,11 @@ CSS = """
                 border-left: 4px solid #6c8cff; line-height: 1.65;
                 font-size: 15px; }
 #caption-card * { color: #1a1d24 !important; }
+#narration-card { background: #fffaf0; color: #2a2418 !important;
+                  padding: 14px 18px; border-radius: 10px;
+                  border-left: 4px solid #d8a64d; line-height: 1.6;
+                  font-size: 14px; min-height: 80px; }
+#narration-card * { color: #2a2418 !important; }
 #stats-card { background: #1f2330; color: #e8eaf2 !important;
               padding: 14px 18px; border-radius: 10px;
               font-family: -apple-system, BlinkMacSystemFont, sans-serif; }
@@ -279,9 +304,19 @@ def build_app() -> gr.Blocks:
                 object_fit="contain", allow_preview=True,
             )
 
-            gr.Markdown("### LLM caption")
+            gr.Markdown("### Live narration")
+            gr.Markdown(
+                "_Each shot is captioned in a background worker as it closes. "
+                "Lines appear here in real time instead of all-at-end._"
+            )
+            narration_md = gr.Markdown(
+                "_(narration will stream here as each shot is captioned.)_",
+                elem_id="narration-card",
+            )
+
+            gr.Markdown("### Final synthesis")
             caption_md = gr.Markdown(
-                "_(caption appears after all keyframes are picked.)_",
+                "_(full-video caption appears after all keyframes are picked.)_",
                 elem_id="caption-card",
             )
 
@@ -293,7 +328,7 @@ def build_app() -> gr.Blocks:
                     enable_caption, caption_model, output_root,
                 ],
                 outputs=[film_strip, status_log, stats_md,
-                         keyframes_gallery, caption_md],
+                         keyframes_gallery, narration_md, caption_md],
                 show_progress="minimal",
             )
 
