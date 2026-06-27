@@ -105,6 +105,32 @@ def build_parser() -> argparse.ArgumentParser:
     bench.add_argument("--sim-threshold", type=float, default=0.96)
     bench.add_argument("--device", default="auto")
 
+    # ---- caption-bench --------------------------------------------------- #
+    capb = sub.add_parser(
+        "caption-bench",
+        help=("Score multiple LLM caption models on the same keyframe set. "
+              "Writes outputs/caption-bench/caption_benchmark.md."),
+    )
+    capb.add_argument("source", help="Video file path.")
+    capb.add_argument(
+        "--models", nargs="+", required=True,
+        help=("LLM model ids to benchmark. Example: --models gpt-5.4 "
+              "google/gemini-2.5-flash anthropic/claude-3.5-haiku."),
+    )
+    capb.add_argument("--output-root", default="outputs/caption-bench",
+                      help="Directory for the caption-bench report.")
+    capb.add_argument("--embedder", default="yolov8n",
+                      choices=list_embedders(),
+                      help="Embedder for the keyframe pass. Default yolov8n.")
+    capb.add_argument("--device", default="auto",
+                      help="Torch device: auto | cpu | cuda | mps. Default auto.")
+    capb.add_argument("--sample-interval", type=float, default=1.0)
+    capb.add_argument("--sim-threshold", type=float, default=0.96)
+    capb.add_argument("--detail", default="low", choices=("low", "high"),
+                      help="Image detail forwarded to every model. Default low.")
+    capb.add_argument("--max-keyframes", type=int, default=16,
+                      help="Cap keyframes sent per model. Default 16.")
+
     return p
 
 
@@ -179,6 +205,10 @@ def main(argv: list[str] | None = None) -> int:
         from .benchmark import run_benchmark
         run_benchmark(args.source, args.embedders, _bench_cfg, args)
         return 0
+
+    if args.command == "caption-bench":
+        from .caption_bench import cli_run
+        return cli_run(args)
 
     if args.command == "web":
         try:
