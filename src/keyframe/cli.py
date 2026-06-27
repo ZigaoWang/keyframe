@@ -181,7 +181,13 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "web":
-        from .webapp import main as web_main
+        try:
+            from .webapp import main as web_main
+        except ModuleNotFoundError as exc:
+            parser.error(
+                f"web UI requires the optional 'gradio' dependency: {exc}.\n"
+                "install it with: pip install 'keyframe[web]'  (or)  pip install gradio"
+            )
         return web_main([f"--host={args.host}", f"--port={args.port}",
                          *(["--share"] if args.share else [])])
 
