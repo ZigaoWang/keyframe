@@ -173,11 +173,9 @@ class _AsyncWriter:
 
 
 def _prepare_frame(bgr: np.ndarray, embed_w: int, cache_w: int) -> tuple[np.ndarray, np.ndarray]:
-    """Return (embed_input, cache_input). Both BGR. Smaller of the two reuses memory."""
+    """Return ``(embed_input, cache_input)``. Both BGR. Smaller of the two reuses memory."""
     embed_bgr = resize_max_width(bgr, embed_w) if embed_w > 0 else bgr
-    if cache_w == embed_w:
-        cache_bgr = embed_bgr
-    elif cache_w <= 0 or cache_w >= bgr.shape[1]:
+    if cache_w <= 0 or cache_w >= bgr.shape[1]:
         cache_bgr = bgr
     elif cache_w == embed_w:
         cache_bgr = embed_bgr
@@ -294,33 +292,33 @@ def iter_pipeline(
             else:
                 imwrite_unicode(bgr_path, cache_bgr)
 
-            closed = segmenter.ingest(
+            result = segmenter.ingest(
                 source_index=frame.index,
                 timestamp_sec=frame.timestamp_sec,
                 embedding=embedding,
                 bgr_path=str(bgr_path),
                 sharpness=sharpness,
             )
-            sampled = segmenter._active.frames[-1] if segmenter._active else None  # type: ignore[attr-defined]
-            if sampled is not None:
-                samples.append(sampled)
-                append_jsonl({
-                    "event": "frame",
-                    "analyzed_idx": sampled.index,
-                    "source_idx": sampled.source_index,
-                    "timestamp_sec": round(sampled.timestamp_sec, 3),
-                    "sim": round(sampled.sim_to_shot_mean, 4),
-                    "sharpness": round(sampled.sharpness, 1),
-                    "is_shot_start": sampled.is_shot_start,
-                    "embed_ms": round(per_frame_ms, 2),
-                }, events_path)
+            sampled = result.sampled
+            closed = result.closed
+            samples.append(sampled)
+            append_jsonl({
+                "event": "frame",
+                "analyzed_idx": sampled.index,
+                "source_idx": sampled.source_index,
+                "timestamp_sec": round(sampled.timestamp_sec, 3),
+                "sim": round(sampled.sim_to_shot_mean, 4),
+                "sharpness": round(sampled.sharpness, 1),
+                "is_shot_start": sampled.is_shot_start,
+                "embed_ms": round(per_frame_ms, 2),
+            }, events_path)
 
             timeline_p: Optional[Path] = None
             sim_p: Optional[Path] = None
             grid_p: Optional[Path] = None
             film_p: Optional[Path] = None
             need_redraw = (analyzed_count % refresh_viz_every == 0
-                           or (sampled is not None and sampled.is_shot_start))
+                           or sampled.is_shot_start)
             if samples and need_redraw:
                 timeline_p = paths.viz_dir / "timeline.jpg"
                 sim_p = paths.viz_dir / "similarity_curve.jpg"
@@ -362,21 +360,21 @@ def iter_pipeline(
             yield ProgressEvent(
                 stage="frame",
                 message=(f"Frame {analyzed_count + 1}: t={frame.timestamp_sec:.1f}s  "
-                         f"sim={sampled.sim_to_shot_mean if sampled else 1.0:.3f}  "
+                         f"sim={sampled.sim_to_shot_mean:.3f}  "
                          f"sharp={sharpness:.0f}  embed={per_frame_ms:.1f}ms"
-                         + ("  [SHOT START]" if sampled and sampled.is_shot_start else "")),
+                         + ("  [SHOT START]" if sampled.is_shot_start else "")),
                 run_dir=paths.root,
                 analyzed_idx=analyzed_count,
                 source_idx=frame.index,
                 timestamp_sec=frame.timestamp_sec,
-                sim_to_shot_mean=sampled.sim_to_shot_mean if sampled else 1.0,
+                sim_to_shot_mean=sampled.sim_to_shot_mean,
                 sharpness=sharpness,
-                is_shot_start=sampled.is_shot_start if sampled else False,
+                is_shot_start=sampled.is_shot_start,
                 embed_ms=per_frame_ms,
-                current_segment_id=segmenter._next_segment_id - 1,  # type: ignore[attr-defined]
+                current_segment_id=segmenter.current_segment_id,
                 bgr_path=str(bgr_path),
                 frames_analyzed=analyzed_count + 1,
-                segments_so_far=len(segmenter.closed_segments) + (1 if segmenter._active else 0),  # type: ignore[attr-defined]
+                segments_so_far=segmenter.total_segments_so_far,
                 keyframes_so_far=len(current_kf),
                 embed_latency_ms_avg=float(np.mean(embed_latencies_ms)),
                 timeline_path=timeline_p,
@@ -416,10 +414,12 @@ def iter_pipeline(
         progress.close()
         last_ts = samples[-1].timestamp_sec if samples else 0.0
         segmenter.finalise(end_sec=last_ts)
-        try:
-            src.release()  # type: ignore[union-attr]
-        except Exception:
-            pass
+        release = getattr(src, "release", None)
+        if callable(release):
+            try:
+                release()
+            except Exception as exc:
+                log.warning("source release failed: %s", exc)
         if writer is not None:
             writer.close()
 

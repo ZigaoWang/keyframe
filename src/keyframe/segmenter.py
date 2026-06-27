@@ -68,8 +68,33 @@ class Segment:
         return len(self.frames)
 
 
+@dataclass
+class IngestResult:
+    """What ``StreamingSegmenter.ingest`` produces.
+
+    Attributes
+    ----------
+    sampled
+        The frame that was just absorbed, fully annotated with similarity,
+        sharpness and shot-start flag.
+    closed
+        The previously-active segment, finalised when this frame opened a new
+        shot. ``None`` while a shot is still growing.
+    """
+
+    sampled: "SampledFrame"
+    closed: Optional["Segment"] = None
+
+
 class StreamingSegmenter:
-    """Stateful segmenter. Call ``ingest(frame)`` and pull ``closed_segment`` if any."""
+    """Stateful online shot segmenter.
+
+    Call :meth:`ingest` once per analyzed frame. The returned
+    :class:`IngestResult` carries the freshly recorded :class:`SampledFrame`
+    and, when a shot boundary fired, the segment that just closed. Use
+    :attr:`closed_segments` to enumerate every finalised segment, and
+    :attr:`active_segment` to peek at the segment currently being grown.
+    """
 
     def __init__(self, cfg: SegmenterConfig) -> None:
         self.cfg = cfg
@@ -84,6 +109,25 @@ class StreamingSegmenter:
     def closed_segments(self) -> list[Segment]:
         return list(self._segments)
 
+    @property
+    def active_segment(self) -> Optional[Segment]:
+        return self._active
+
+    @property
+    def next_segment_id(self) -> int:
+        """Identifier the next opened segment will receive."""
+        return self._next_segment_id
+
+    @property
+    def current_segment_id(self) -> int:
+        """Identifier of the segment currently being grown, or -1 if none."""
+        return self._active.segment_id if self._active is not None else -1
+
+    @property
+    def total_segments_so_far(self) -> int:
+        """Count of closed + active segments. Useful for live progress UIs."""
+        return len(self._segments) + (1 if self._active is not None else 0)
+
     def ingest(
         self,
         source_index: int,
@@ -91,10 +135,15 @@ class StreamingSegmenter:
         embedding: np.ndarray,
         bgr_path: str,
         sharpness: float,
-    ) -> Optional[Segment]:
-        """Feed one analyzed frame. Returns the segment just closed (if any).
+    ) -> IngestResult:
+        """Feed one analyzed frame.
 
-        The returned segment is also appended to ``closed_segments``.
+        Returns
+        -------
+        IngestResult
+            ``result.sampled`` is the just-recorded frame.
+            ``result.closed`` is the previous segment if this frame opened a
+            new shot, otherwise ``None``.
         """
         cfg = self.cfg
         sim = 1.0
@@ -149,7 +198,7 @@ class StreamingSegmenter:
 
         assert self._active is not None
         self._active.frames.append(sampled)
-        return closed
+        return IngestResult(sampled=sampled, closed=closed)
 
     def finalise(self, end_sec: float | None = None) -> Optional[Segment]:
         """Close the currently open shot. Call once at end of stream."""
