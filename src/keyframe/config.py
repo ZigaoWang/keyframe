@@ -70,16 +70,18 @@ class CaptionerConfig:
     """LLM caption stage."""
     enabled: bool = True
     model: str = "gpt-5.4"
+    """Default model id. Override with --model on the CLI."""
+
     base_url_env: str = "OPENAI_BASE_URL"
     api_key_env: str = "OPENAI_API_KEY"
     detail: str = "low"
-    """'low' or 'high'. low = cheaper + faster, fine for downscaled frames."""
+    """``'low'`` or ``'high'``. Low is cheaper and faster, fine for downscaled frames."""
 
     max_keyframes: int = 24
     """Hard cap on frames sent in a single LLM call."""
 
     thumb_max_width: int = 512
-    """Resize keyframes to at most this width before encoding to base64."""
+    """Resize keyframes to at most this width before base64 encoding."""
 
     jpeg_quality: int = 80
 
@@ -88,8 +90,8 @@ class CaptionerConfig:
         "qwen/qwen2.5-vl-72b-instruct",
         "anthropic/claude-3.5-sonnet",
     )
-    """If the primary model returns a region-block (403) or auth error, try
-    these models in order. OpenRouter rejects ``openai/*`` in some regions; the
+    """Tried in order when the primary model returns a regional-block / auth
+    error. OpenRouter rejects some ``openai/*`` ids in certain regions; the
     fallbacks here are regularly available worldwide."""
 
 
@@ -170,7 +172,12 @@ def resolve_device(requested: str) -> str:
 
 
 def load_dotenv(path: Path | str = ".env") -> None:
-    """Tiny dotenv loader. No external dep."""
+    """Tiny dotenv loader. No external dep.
+
+    Reads ``KEY=VALUE`` lines, strips surrounding single or double quotes from
+    the value, and only sets keys that are not already present in the process
+    environment. Lines starting with ``#`` or missing ``=`` are ignored.
+    """
     p = Path(path)
     if not p.exists():
         return
@@ -179,4 +186,8 @@ def load_dotenv(path: Path | str = ".env") -> None:
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
-        os.environ.setdefault(key.strip(), value.strip())
+        key = key.strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        os.environ.setdefault(key, value)
