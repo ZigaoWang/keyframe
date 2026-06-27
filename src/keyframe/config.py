@@ -124,8 +124,13 @@ class PipelineConfig:
     """Debug: also keep every sampled frame on disk. Off by default to save space."""
 
     # ---- speed knobs --------------------------------------------------- #
-    batch_size: int = 8
-    """Frames per embed call when running on a file. Stream sources stay at 1."""
+    batch_size: int = 32
+    """Frames per embed call when running on a file. Stream sources stay at 1.
+
+    32 saturates a typical M-series MPS or single-GPU CUDA pipeline for YOLO
+    backbones at 640px. Lower this if you OOM on very small GPUs; raise it
+    on a fat workstation if profiling shows the embedder is still gated by
+    dispatch overhead."""
 
     cache_thumb_width: int = 640
     """Resize cached analyzed frames to this max width before writing to disk."""
