@@ -10,6 +10,11 @@ env/
 build/
 dist/
 
+# tests / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
 # os
 .DS_Store
 Thumbs.db

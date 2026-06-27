@@ -2,6 +2,7 @@
 name = "keyframe"
 version = "0.1.0"
 description = "Stream-friendly keyframe extraction and LLM video understanding."
+readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "opencv-python>=4.8",
@@ -13,6 +14,10 @@ dependencies = [
     "rich>=13.0",
 ]
 
+[project.optional-dependencies]
+web = ["gradio>=4.40"]
+dev = ["pytest>=8.0", "ruff>=0.4"]
+
 [project.scripts]
 keyframe = "keyframe.cli:main"
 
@@ -22,3 +27,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

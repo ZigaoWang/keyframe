@@ -5,3 +5,5 @@ ultralytics>=8.0
 openai>=1.0
 tqdm>=4.65
 rich>=13.0
+# Optional: only needed for the `keyframe web` Gradio UI.
+gradio>=4.40
