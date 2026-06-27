@@ -183,7 +183,6 @@ def draw_timeline(
 ) -> None:
     if not samples:
         return
-    num_segments = max(s.is_shot_start for s in samples)
     seg_ids = []
     cur = -1
     for s in samples:
