@@ -1,0 +1,39 @@
+# python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+*.egg-info/
+build/
+dist/
+
+# os
+.DS_Store
+Thumbs.db
+
+# editor
+.vscode/
+.idea/
+*.swp
+
+# secrets
+.env
+
+# model weights (auto-downloaded on first run)
+*.pt
+*.onnx
+*.engine
+
+# pipeline outputs (per-run artefacts, large)
+outputs/
+
+# input videos (large binary, user-supplied)
+video/*.MOV
+video/*.mp4
+video/*.mov
+video/*.mkv
+video/*.avi
+video/.DS_Store

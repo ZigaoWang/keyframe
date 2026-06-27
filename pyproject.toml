@@ -1,0 +1,24 @@
+[project]
+name = "keyframe"
+version = "0.1.0"
+description = "Stream-friendly keyframe extraction and LLM video understanding."
+requires-python = ">=3.10"
+dependencies = [
+    "opencv-python>=4.8",
+    "numpy>=1.24",
+    "torch>=2.0",
+    "ultralytics>=8.0",
+    "openai>=1.0",
+    "tqdm>=4.65",
+    "rich>=13.0",
+]
+
+[project.scripts]
+keyframe = "keyframe.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

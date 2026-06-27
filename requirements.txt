@@ -1,0 +1,7 @@
+opencv-python>=4.8
+numpy>=1.24
+torch>=2.0
+ultralytics>=8.0
+openai>=1.0
+tqdm>=4.65
+rich>=13.0
