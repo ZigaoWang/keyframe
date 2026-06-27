@@ -736,7 +736,7 @@ or RTSP → live keyframes + streaming captions).
 
 | Workload | Recommended embedder | Why |
 | --- | --- | --- |
-| Realtime (webcam, low end) | `mobileclip-s0` | ~3 ms / frame, semantic |
+| Realtime (webcam, low end) | `mobileclip-s1` | ~5 ms / frame, semantic |
 | Offline best quality       | `siglip-b16`    | best retrieval scores |
 | Default / general          | `yolov8n`       | 24 ms on MPS, no extra dep |
 | CPU-only / no GPU          | `phash`         | <1 ms, gross changes only |
@@ -860,8 +860,8 @@ def build_app() -> gr.Blocks:
                         label="Webcam index or RTSP / HTTP URL",
                     )
                     live_embedder = gr.Dropdown(
-                        embedder_choices, value="mobileclip-s0",
-                        label="Embedder (recommend mobileclip-s0 for live)",
+                        embedder_choices, value="mobileclip-s1",
+                        label="Embedder (recommend mobileclip-s1 for live)",
                     )
                     live_interval = gr.Slider(0.25, 3.0, value=1.0, step=0.25,
                                               label="Sample every N seconds")
@@ -928,7 +928,7 @@ def build_app() -> gr.Blocks:
                     )
                     cmp_embedders = gr.CheckboxGroup(
                         embedder_choices,
-                        value=["yolov8n", "mobileclip-s0", "siglip-b16"],
+                        value=["yolov8n", "mobileclip-s1", "siglip-b16"],
                         label="Embedders",
                     )
                     cmp_interval = gr.Slider(0.25, 5.0, value=1.0, step=0.25,

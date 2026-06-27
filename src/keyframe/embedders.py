@@ -11,7 +11,8 @@ Registered embedders:
   mobile_sam                        MobileSAM TinyViT image encoder (global-pooled)
   clip-vit-b32 / b16 / l14          OpenAI CLIP image tower (semantic)
   siglip-b16                        SigLIP base/16-256 (beats CLIP on retrieval)
-  mobileclip-s0                     MobileCLIP-S0 (Apple) - fastest semantic encoder
+  mobileclip-s1 / s2 / b            MobileCLIP v1 family (Apple)
+  mobileclip2-s0                    MobileCLIP v2 small (DFN-DR-2B pretrain)
   phash                             8x8 DCT perceptual hash (cheap baseline)
   hsv                               HSV histogram (color-only signature)
 
@@ -418,11 +419,35 @@ class SigLipB16(_OpenClipEmbedder):
     dim = 768
 
 
-@register("mobileclip-s0")
-class MobileClipS0(_OpenClipEmbedder):
-    """MobileCLIP-S0 (Apple). 512-d, ~3 ms / frame on M-series MPS. Fastest semantic encoder we ship."""
-    model_name = "MobileCLIP-S0"
+@register("mobileclip-s1")
+class MobileClipS1(_OpenClipEmbedder):
+    """MobileCLIP-S1 (Apple). ~5 ms / frame on M-series MPS. Fast semantic encoder."""
+    model_name = "MobileCLIP-S1"
     pretrained = "datacompdr"
+    dim = 512
+
+
+@register("mobileclip-s2")
+class MobileClipS2(_OpenClipEmbedder):
+    """MobileCLIP-S2 (Apple). A notch slower than S1, higher accuracy."""
+    model_name = "MobileCLIP-S2"
+    pretrained = "datacompdr"
+    dim = 512
+
+
+@register("mobileclip-b")
+class MobileClipB(_OpenClipEmbedder):
+    """MobileCLIP-B (Apple). Largest of the originals; still ViT-based."""
+    model_name = "MobileCLIP-B"
+    pretrained = "datacompdr_lt"
+    dim = 512
+
+
+@register("mobileclip2-s0")
+class MobileClip2S0(_OpenClipEmbedder):
+    """MobileCLIP2-S0 (Apple, v2). DFN-DR-2B pretrain; fastest of the v2 family."""
+    model_name = "MobileCLIP2-S0"
+    pretrained = "dfndr2b"
     dim = 512
 
 

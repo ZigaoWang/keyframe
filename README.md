@@ -201,7 +201,8 @@ and the Gradio app consume internally.
 | `clip-vit-b16` | OpenAI CLIP ViT-B/16 (semantic) | 512 | Sharper than B/32, ~2× cost. |
 | `clip-vit-l14` | OpenAI CLIP ViT-L/14 (semantic) | 768 | Best semantic separation we ship; heavy. |
 | `siglip-b16` | SigLIP base/16-256 | 768 | Generally beats CLIP on retrieval benchmarks. |
-| `mobileclip-s0` | Apple MobileCLIP-S0 | 512 | Fastest semantic encoder, ~3 ms / frame on MPS. |
+| `mobileclip-s1` | Apple MobileCLIP-S1 | 512 | Fast semantic encoder, ~5 ms / frame on MPS. |
+| `mobileclip-s2` / `b` / `mobileclip2-s0` | Apple MobileCLIP family | 512 | Heavier accuracy/throughput tradeoffs. |
 | `phash` | 8x8 DCT perceptual hash | 64 | <1 ms on CPU. Zero-dependency baseline. |
 | `hsv` | 3-channel HSV histogram | 96 | <1 ms on CPU. Colour-only signature. |
 
