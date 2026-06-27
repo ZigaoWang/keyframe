@@ -220,23 +220,25 @@ class FfmpegSampledSource:
         if self._proc is None:
             self._spawn()
         assert self._proc is not None and self._proc.stdout is not None
-        idx = 0
-        while True:
-            buf = self._proc.stdout.read(self._frame_bytes)
-            if not buf:
-                break
-            if len(buf) < self._frame_bytes:
-                log.warning("ffmpeg returned short frame (%d/%d bytes), stopping",
-                            len(buf), self._frame_bytes)
-                break
-            bgr = np.frombuffer(buf, dtype=np.uint8).reshape(self.height, self.width, 3)
-            yield Frame(
-                index=idx,
-                timestamp_sec=self.start_sec + float(idx) * self.interval_sec,
-                bgr=bgr.copy(),
-            )
-            idx += 1
-        self._drain()
+        try:
+            idx = 0
+            while True:
+                buf = self._proc.stdout.read(self._frame_bytes)
+                if not buf:
+                    break
+                if len(buf) < self._frame_bytes:
+                    log.warning("ffmpeg returned short frame (%d/%d bytes), stopping",
+                                len(buf), self._frame_bytes)
+                    break
+                bgr = np.frombuffer(buf, dtype=np.uint8).reshape(self.height, self.width, 3)
+                yield Frame(
+                    index=idx,
+                    timestamp_sec=self.start_sec + float(idx) * self.interval_sec,
+                    bgr=bgr.copy(),
+                )
+                idx += 1
+        finally:
+            self._drain()
 
     def iter_sampled(self, interval_sec: float) -> Iterator[Frame]:
         """Compatibility shim. Interval is fixed at construction; warn if it differs."""
