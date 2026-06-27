@@ -24,6 +24,7 @@ Speed design
 from __future__ import annotations
 
 import json
+import os
 import queue
 import threading
 import time
@@ -36,7 +37,7 @@ import cv2
 import numpy as np
 from tqdm import tqdm
 
-from .captioner import caption_keyframes
+from .captioner import SegmentCaption, caption_keyframes, caption_segment
 from .config import PipelineConfig, load_dotenv, resolve_device
 from .embedders import build_embedder
 from .ffmpeg_source import FfmpegSampledSource, ParallelFfmpegSource, ffmpeg_available
@@ -132,6 +133,12 @@ class ProgressEvent:
     final_result: Optional[PipelineResult] = None
     caption_text: str = ""
 
+    segment_caption: Optional[SegmentCaption] = None
+    """A just-completed per-segment caption. Set on streaming events; None
+    otherwise. UIs can append ``segment_caption.text`` to a running narration."""
+    segment_captions: list[SegmentCaption] = field(default_factory=list)
+    """Every segment caption captured so far, in segment-id order."""
+
 
 def _select_partial(segments: list[Segment], cfg) -> list[Keyframe]:
     if not segments:
@@ -170,6 +177,68 @@ class _AsyncWriter:
                 imwrite_unicode(path, bgr)
             except Exception as exc:  # pragma: no cover
                 log.warning("async write failed for %s: %s", path, exc)
+
+
+class _SegmentCaptionWorker:
+    """Background thread that captions segments as they close.
+
+    The pipeline calls :meth:`submit` with a closed segment and the keyframes
+    selected from it; the worker calls the LLM and pushes the resulting
+    :class:`SegmentCaption` onto an output queue. The main loop drains that
+    queue between frames with :meth:`drain_ready`, so the only blocking the
+    pipeline ever does is the embed call itself.
+    """
+
+    def __init__(self, cap_cfg) -> None:
+        self.cap_cfg = cap_cfg
+        self._in: "queue.Queue[tuple[int, float, float, list[Keyframe]] | None]" = queue.Queue()
+        self._out: "queue.Queue[SegmentCaption]" = queue.Queue()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        self._closed = False
+
+    def submit(self, segment: Segment, keyframes_in_segment: list[Keyframe]) -> None:
+        if self._closed or not keyframes_in_segment:
+            return
+        self._in.put((segment.segment_id, segment.start_sec, segment.end_sec,
+                      list(keyframes_in_segment)))
+
+    def drain_ready(self) -> list[SegmentCaption]:
+        out: list[SegmentCaption] = []
+        while True:
+            try:
+                out.append(self._out.get_nowait())
+            except queue.Empty:
+                return out
+
+    def close(self, timeout: float = 60.0) -> list[SegmentCaption]:
+        """Signal end-of-stream, wait for queued captions to finish, return them."""
+        if self._closed:
+            return []
+        self._closed = True
+        self._in.put(None)
+        self._thread.join(timeout=timeout)
+        return self.drain_ready()
+
+    def _run(self) -> None:
+        while True:
+            item = self._in.get()
+            if item is None:
+                return
+            segment_id, start_sec, end_sec, kfs = item
+            try:
+                cap = caption_segment(
+                    segment_id=segment_id, start_sec=start_sec, end_sec=end_sec,
+                    keyframes=kfs, cfg=self.cap_cfg,
+                )
+                self._out.put(cap)
+            except Exception as exc:  # pragma: no cover
+                log.warning("segment %d caption failed: %s", segment_id, exc)
+                self._out.put(SegmentCaption(
+                    segment_id=segment_id, start_sec=start_sec, end_sec=end_sec,
+                    text=f"(caption failed: {exc})", model="",
+                    latency_sec=0.0, frames_sent=0,
+                ))
 
 
 def _prepare_frame(bgr: np.ndarray, embed_w: int, cache_w: int) -> tuple[np.ndarray, np.ndarray]:
@@ -263,6 +332,18 @@ def iter_pipeline(
 
     writer: Optional[_AsyncWriter] = _AsyncWriter() if cfg.async_disk_writes else None
 
+    cap_worker: Optional[_SegmentCaptionWorker] = None
+    if cfg.captioner.enabled and cfg.captioner.stream_per_segment:
+        api_key = os.environ.get(cfg.captioner.api_key_env)
+        if api_key:
+            cap_worker = _SegmentCaptionWorker(cfg.captioner)
+        else:
+            log.info("streaming captions disabled: %s not set",
+                     cfg.captioner.api_key_env)
+
+    segment_captions: list[SegmentCaption] = []
+    segment_captions_path = paths.captions_dir / "segments.jsonl"
+
     total_frames_hint: int | None = None
     if is_file and duration_sec_hint and cfg.sampler.interval_sec > 0:
         total_frames_hint = max(1, int(duration_sec_hint / cfg.sampler.interval_sec))
@@ -342,6 +423,10 @@ def iter_pipeline(
                 if film_p is None:
                     film_p = paths.viz_dir / "film_strip.jpg"
                     draw_film_strip(samples, current_kf, film_p)
+                if cap_worker is not None:
+                    kfs_for_segment = [k for k in current_kf
+                                       if k.segment_id == closed.segment_id]
+                    cap_worker.submit(closed, kfs_for_segment)
                 yield ProgressEvent(
                     stage="segment_closed",
                     message=(f"Segment #{closed.segment_id} closed at t={closed.end_sec:.1f}s "
@@ -355,7 +440,34 @@ def iter_pipeline(
                     keyframes_grid_path=grid_p,
                     film_strip_path=film_p,
                     keyframes=list(current_kf),
+                    segment_captions=list(segment_captions),
                 )
+
+            if cap_worker is not None:
+                for cap in cap_worker.drain_ready():
+                    segment_captions.append(cap)
+                    segment_captions.sort(key=lambda c: c.segment_id)
+                    append_jsonl({
+                        "event": "segment_caption",
+                        "segment_id": cap.segment_id,
+                        "start_sec": round(cap.start_sec, 3),
+                        "end_sec": round(cap.end_sec, 3),
+                        "model": cap.model,
+                        "latency_sec": round(cap.latency_sec, 2),
+                        "text": cap.text,
+                    }, segment_captions_path)
+                    yield ProgressEvent(
+                        stage="segment_caption",
+                        message=(f"Segment #{cap.segment_id} ({cap.start_sec:.1f}-"
+                                 f"{cap.end_sec:.1f}s): {cap.text}"),
+                        run_dir=paths.root,
+                        current_segment_id=cap.segment_id,
+                        segments_so_far=segmenter.total_segments_so_far,
+                        keyframes_so_far=len(current_kf),
+                        keyframes=list(current_kf),
+                        segment_caption=cap,
+                        segment_captions=list(segment_captions),
+                    )
 
             yield ProgressEvent(
                 stage="frame",
@@ -413,7 +525,7 @@ def iter_pipeline(
     finally:
         progress.close()
         last_ts = samples[-1].timestamp_sec if samples else 0.0
-        segmenter.finalise(end_sec=last_ts)
+        final_segment = segmenter.finalise(end_sec=last_ts)
         release = getattr(src, "release", None)
         if callable(release):
             try:
@@ -422,6 +534,11 @@ def iter_pipeline(
                 log.warning("source release failed: %s", exc)
         if writer is not None:
             writer.close()
+        if cap_worker is not None and final_segment is not None:
+            tail_kf = _select_partial(segmenter.closed_segments, cfg.selector)
+            tail_for_segment = [k for k in tail_kf
+                                if k.segment_id == final_segment.segment_id]
+            cap_worker.submit(final_segment, tail_for_segment)
 
     yield ProgressEvent(
         stage="select", message="Selecting keyframes from all segments...",
@@ -429,6 +546,33 @@ def iter_pipeline(
     )
     segments = segmenter.closed_segments
     keyframes = select_all_keyframes(segments, cfg.selector)
+
+    if cap_worker is not None:
+        leftover = cap_worker.close(timeout=120.0)
+        for cap in leftover:
+            segment_captions.append(cap)
+            append_jsonl({
+                "event": "segment_caption",
+                "segment_id": cap.segment_id,
+                "start_sec": round(cap.start_sec, 3),
+                "end_sec": round(cap.end_sec, 3),
+                "model": cap.model,
+                "latency_sec": round(cap.latency_sec, 2),
+                "text": cap.text,
+            }, segment_captions_path)
+            yield ProgressEvent(
+                stage="segment_caption",
+                message=(f"Segment #{cap.segment_id} ({cap.start_sec:.1f}-"
+                         f"{cap.end_sec:.1f}s): {cap.text}"),
+                run_dir=paths.root,
+                current_segment_id=cap.segment_id,
+                segments_so_far=len(segments),
+                keyframes_so_far=len(keyframes),
+                keyframes=list(keyframes),
+                segment_caption=cap,
+                segment_captions=list(segment_captions),
+            )
+        segment_captions.sort(key=lambda c: c.segment_id)
 
     saved_kf_paths: list[Path] = []
     for kf in keyframes:
@@ -506,6 +650,7 @@ def iter_pipeline(
         keyframes=keyframes,
         segments_so_far=len(segments),
         keyframes_so_far=len(keyframes),
+        segment_captions=list(segment_captions),
     )
     try:
         result = caption_keyframes(keyframes, duration_sec, cfg.captioner)
@@ -528,6 +673,18 @@ def iter_pipeline(
         log.exception("captioner failed: %s", exc)
         caption_text = f"(captioner failed: {exc})"
         (paths.captions_dir / "caption.md").write_text(caption_text, encoding="utf-8")
+
+    if segment_captions:
+        sidecar = ["# Per-segment captions", ""]
+        for cap in segment_captions:
+            sidecar.append(
+                f"- **#{cap.segment_id}** "
+                f"`t={cap.start_sec:.1f}–{cap.end_sec:.1f}s` "
+                f"({cap.latency_sec:.1f}s, `{cap.model}`): {cap.text}"
+            )
+        (paths.captions_dir / "segments.md").write_text(
+            "\n".join(sidecar) + "\n", encoding="utf-8",
+        )
 
     embed_p50 = float(np.percentile(embed_latencies_ms, 50)) if embed_latencies_ms else 0.0
     embed_p95 = float(np.percentile(embed_latencies_ms, 95)) if embed_latencies_ms else 0.0
@@ -568,6 +725,7 @@ def iter_pipeline(
         keyframes=keyframes,
         final_result=summary,
         caption_text=caption_text,
+        segment_captions=list(segment_captions),
     )
 
 
