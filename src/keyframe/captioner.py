@@ -169,7 +169,8 @@ def caption_keyframes(
         )
 
     latency = time.perf_counter() - t0
-    text = response.choices[0].message.content.strip()
+    raw_text = response.choices[0].message.content
+    text = (raw_text or "").strip()
     usage = None
     if getattr(response, "usage", None) is not None:
         try:
